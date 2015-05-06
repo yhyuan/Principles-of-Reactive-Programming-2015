@@ -10,25 +10,31 @@ import scala.async.Async.{async, await}
 /** Contains basic data types, data structures and `Future` extensions.
  */
 package object nodescala {
-
+// due to: implementation restriction: nested class is not allowed in value class
+  def timerTask(call: => Any) = new java.util.TimerTask { override def run { call } }
+  
   /** Adds extensions methods to the `Future` companion object.
    */
   implicit class FutureCompanionOps(val f: Future.type) extends AnyVal {
 
     /** Returns a future that is always completed with `value`.
      */
-    def always[T](value: T): Future[T] = ???
+    def always[T](value: T): Future[T] = Promise[T].success(value).future
     /** Returns a future that is never completed.
      *
      *  This future may be useful when testing if timeout logic works correctly.
      */
-    def never[T]: Future[T] = ???
+    def never[T]: Future[T] = Promise[T].future
     /** Given a list of futures `fs`, returns the future holding the list of values of all the futures from `fs`.
      *  The returned future is completed only once all of the futures in `fs` have been completed.
      *  The values in the list are in the same order as corresponding futures `fs`.
      *  If any of the futures `fs` fails, the resulting future also fails.
      */
-    def all[T](fs: List[Future[T]]): Future[List[T]] = ???
+    def all[T](fs: List[Future[T]]): Future[List[T]] = { // Future.sequence
+      fs.foldLeft(Future.successful(List[T]())) { (accf, future) =>
+        accf.flatMap ( acc => future.map (_ :: acc) )
+      } .map(_.reverse)
+    }
     /** Given a list of futures `fs`, returns the future holding the value of the future from `fs` that completed first.
      *  If the first completing future in `fs` fails, then the result is failed as well.
      *
@@ -38,11 +44,19 @@ package object nodescala {
      *
      *  may return a `Future` succeeded with `1`, `2` or failed with an `Exception`.
      */
-    def any[T](fs: List[Future[T]]): Future[T] = ???
+    def any[T](fs: List[Future[T]]): Future[T] =  {
+      val promise = Promise[T]
+      fs.foreach ( _.onComplete { case try_ => promise.tryComplete(try_) } )
+      promise.future
+    }
 
     /** Returns a future with a unit value that is completed after time `t`.
      */
-    def delay(t: Duration): Future[Unit] = ???
+    def delay(t: Duration): Future[Unit] = {
+      val promise = Promise[Unit]
+      (new java.util.Timer(getClass.getSimpleName + ".delay")).schedule(timerTask { promise.success(Unit) }, t.toMillis)
+      promise.future
+    }
 
     /** Completes this future with user input.
      */
@@ -54,7 +68,11 @@ package object nodescala {
 
     /** Creates a cancellable context for an execution and runs it.
      */
-    def run()(f: CancellationToken => Future[Unit]): Subscription = ???
+    def run()(f: CancellationToken => Future[Unit]): Subscription =  {
+      val cts = CancellationTokenSource()
+      f(cts.cancellationToken)
+      cts
+    }
 
   }
 
@@ -70,7 +88,7 @@ package object nodescala {
      *  However, it is also non-deterministic -- it may throw or return a value
      *  depending on the current state of the `Future`.
      */
-    def now: T = ???
+    def now: T = f.value.getOrElse(throw new NoSuchElementException).get
 
     /** Continues the computation of this future by taking the current future
      *  and mapping it into another future.
@@ -78,7 +96,18 @@ package object nodescala {
      *  The function `cont` is called only after the current future completes.
      *  The resulting future contains a value returned by `cont`.
      */
-    def continueWith[S](cont: Future[T] => S): Future[S] = ???
+    def continueWith[S](cont: Future[T] => S): Future[S] = { // f.map(whatever => cont(f))
+      val promise = Promise[S]
+      f.onComplete { case whatever =>
+        val try_ = try {
+          Success(cont(f))
+        } catch {
+          case NonFatal(t) => Failure(t)
+        }
+        promise.complete(try_)
+      }
+      promise.future
+    }
 
     /** Continues the computation of this future by taking the result
      *  of the current future and mapping it into another future.
@@ -86,7 +115,20 @@ package object nodescala {
      *  The function `cont` is called only after the current future completes.
      *  The resulting future contains a value returned by `cont`.
      */
-    def continue[S](cont: Try[T] => S): Future[S] = ???
+    def continue[S](cont: Try[T] => S): Future[S] = {
+      val promise = Promise[S]
+      f.onComplete { case maybe =>
+        val try_ = try {
+          Success(cont(maybe))
+        } catch {
+          case NonFatal(t) => Failure(t)
+        }
+        promise.complete(try_)
+      }
+      promise.future
+    }
+
+  }
 
   }
 
